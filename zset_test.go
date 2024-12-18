@@ -1,9 +1,3 @@
-/*
- * @Author: werbenhu
- * @Email: werbenhuang@hk1180.com
- * @Date: 2024-12-03 17:11:02
- * @Update: 2024-12-03 17:11:02
- */
 package ranker
 
 import (
