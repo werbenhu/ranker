@@ -3,8 +3,11 @@ module github.com/werbenhu/ranker
 go 1.23.2
 
 require (
+	github.com/MauriceGit/skiplist v0.0.0-20211105230623-77f5c8d3e145
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/google/uuid v1.6.0
+	github.com/huandu/skiplist v1.2.1
+	github.com/sean-public/fast-skiplist v0.0.0-20200308194023-d7f7945b944e
 	github.com/stretchr/testify v1.10.0
 )
 

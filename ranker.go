@@ -2,8 +2,10 @@ package ranker
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
+	"time"
 	"unsafe"
 
 	"github.com/cockroachdb/pebble"
@@ -11,93 +13,82 @@ import (
 )
 
 const (
-	defaultDir     = ".rank"
-	defaultZSetKey = "rank"
+	defaultStorageDir = ".rank" // Default storage directory
 )
 
-// FloatToBytes converts a float64 to a byte slice using math.Float64bits.
-func floatToBytes(f float64) []byte {
-	bits := math.Float64bits(f)                // Convert to uint64
-	bytes := make([]byte, 8)                   // Allocate a 8-byte slice
-	binary.LittleEndian.PutUint64(bytes, bits) // Encode bits into bytes
+// Converts float64 to a byte slice (little-endian).
+func float64ToBytes(value float64) []byte {
+	bits := math.Float64bits(value)
+	bytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bytes, bits)
 	return bytes
 }
 
-// BytesToFloat converts a byte slice to a float64 using math.Float64frombits.
-func bytesToFloat(b []byte) float64 {
-	bits := binary.LittleEndian.Uint64(b) // Decode bytes into uint64
-	return math.Float64frombits(bits)     // Convert uint64 back to float64
+// Converts a byte slice to float64 (little-endian).
+func bytesToFloat64(data []byte) float64 {
+	bits := binary.LittleEndian.Uint64(data)
+	return math.Float64frombits(bits)
 }
 
-// 不安全的string转[]byte方法
-func stringToBytes(s string) []byte {
-	// 直接使用unsafe.Pointer进行类型转换
+// Unsafe conversion of string to []byte.
+func unsafeStringToBytes(s string) []byte {
 	return *(*[]byte)(unsafe.Pointer(&s))
 }
 
-// 不安全的[]byte转string方法
-func bytesToString(b []byte) string {
-	// 直接使用unsafe.Pointer进行类型转换
+// Unsafe conversion of []byte to string.
+func unsafeBytesToString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-// Option represents a configuration option for initializing a Ranker.
+// Option defines configuration options for the Ranker.
 type Option func(*Ranker)
 
-// Ranker represents a ranking manager that handles ranking operations for players.
+// Ranker manages leaderboard operations.
 type Ranker struct {
-	ID         string // Unique identifier for the ranker instance
-	StorageDir string // Directory for storing persistent data
-
-	zset *ZSet
-	db   *pebble.DB
+	ID         string // Ranker instance identifier
+	StorageDir string // Directory for persistent storage
+	zset       *ZSet
+	db         *pebble.DB
 }
 
-// Entry represents a single ranking entry, including the rank, score, and player information.
+// Entry represents a player's rank, score, and identifier.
 type Entry struct {
-	Rank  int     // Player's rank in the leaderboard
+	Rank  int     // Player's rank
 	Score float64 // Player's score
-	Key   string  // Player's unique identifier or name
+	Key   string  // Player's unique identifier
 }
 
-// WithID sets the ID of the Ranker.
+// Configures a custom ID for the Ranker instance.
 func WithID(id string) Option {
 	return func(r *Ranker) {
 		r.ID = id
 	}
 }
 
-// WithStorageDir sets the storage directory for the Ranker.
+// Configures a custom storage directory for the Ranker.
 func WithStorageDir(storageDir string) Option {
 	return func(r *Ranker) {
 		r.StorageDir = storageDir
 	}
 }
 
-// New creates a new Ranker instance with the given options.
-func New(opts ...Option) *Ranker {
-	// Default Ranker instance
-
+// Creates a new Ranker with the specified options.
+func New(options ...Option) *Ranker {
 	ranker := &Ranker{
-		ID:         uuid.NewString(), // Generate a default UUID if ID is not provided
-		StorageDir: defaultDir,
+		ID:         uuid.NewString(),
+		StorageDir: defaultStorageDir,
 		zset:       NewZSet(),
 	}
-
-	// Apply options
-	for _, opt := range opts {
+	for _, opt := range options {
 		opt(ranker)
 	}
-
 	return ranker
 }
 
-// Start initializes any necessary resources or processes for the Ranker.
+// Initializes the Ranker, including loading existing data.
 func (r *Ranker) Start() error {
-	// Initialize resources or processes.
-
 	var err error
-	exist := r.isDataExist(r.StorageDir)
+	exist := r.dataExists(r.StorageDir)
 
 	r.db, err = pebble.Open(r.StorageDir, &pebble.Options{})
 	if err != nil {
@@ -105,67 +96,54 @@ func (r *Ranker) Start() error {
 	}
 
 	if exist {
+		startTime := time.Now()
 		if err := r.loadData(); err != nil {
 			return err
 		}
+		elapsedTime := time.Since(startTime)
+		fmt.Printf("loaded in %v\n", elapsedTime)
 	}
-
 	return nil
 }
 
-// Close releases any resources or stops any processes associated with the Ranker.
+// Releases resources associated with the Ranker.
 func (r *Ranker) Close() {
-	// Release resources or stop processes.
 	if r.db != nil {
 		r.db.Close()
 	}
 }
 
-// Update updates the score for a specific player. If the player does not exist, they are added to the ranking system.
-func (r *Ranker) Update(key string, score float64) error {
-	// Update or add the player's score.
-
-	err := r.db.Set(stringToBytes(key), floatToBytes(score), pebble.NoSync)
-	if err != nil {
+// Updates or adds a player's score in the leaderboard.
+func (r *Ranker) Update(playerID string, score float64) error {
+	if err := r.db.Set(unsafeStringToBytes(playerID), float64ToBytes(score), pebble.NoSync); err != nil {
 		return err
 	}
-
-	_, err = r.zset.zadd(defaultZSetKey, score, key, nil)
+	_, err := r.zset.ZAdd(score, playerID)
 	return err
 }
 
-// Rank retrieves the ranking entry for a specific player.
-// Returns the Entry object for the player or an error if the player does not exist.
-func (r *Ranker) Rank(key string) (*Entry, error) {
-	ret, err := r.zset.ZRevRankWithScore(defaultZSetKey, key)
+// Retrieves the ranking details for a specific player.
+func (r *Ranker) Rank(playerID string) (*Entry, error) {
+	result, err := r.zset.ZRevRankWithScore(playerID)
 	if err != nil {
 		return nil, err
 	}
-
-	return &Entry{
-		Rank:  int(ret.Rank),
-		Score: ret.Score,
-		Key:   key,
-	}, nil
+	return &Entry{Rank: int(result.Rank), Score: result.Score, Key: playerID}, nil
 }
 
-// Range retrieves a slice of ranking entries within the specified range [start, end].
-// Returns a list of Entries or an error if the range is invalid or there are no entries.
-func (r *Ranker) Range(start int, end int) ([]*Entry, error) {
-	// Retrieve ranking entries within the specified range.
+// Retrieves a range of ranking entries.
+func (r *Ranker) Range(start, end int) ([]*Entry, error) {
 	return nil, nil
 }
 
-// 检查数据库是否存在
-func (r *Ranker) isDataExist(path string) bool {
+// Checks if persistent data exists at the specified path.
+func (r *Ranker) dataExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil || !os.IsNotExist(err)
 }
 
-// 从数据库加载数据到内存
+// Loads leaderboard data from persistent storage into memory.
 func (r *Ranker) loadData() error {
-
-	// Iterate 遍历所有键值对
 	iter, err := r.db.NewIter(&pebble.IterOptions{})
 	if err != nil {
 		return err
@@ -173,20 +151,11 @@ func (r *Ranker) loadData() error {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-
-		// 复制键值对到内存
-		key := bytesToString(iter.Key())
-		value := bytesToFloat(iter.Value())
-
-		_, err = r.zset.zadd(defaultZSetKey, value, key, nil)
-		if err != nil {
+		playerID := unsafeBytesToString(iter.Key())
+		score := bytesToFloat64(iter.Value())
+		if _, err := r.zset.ZAdd(score, playerID); err != nil {
 			return err
 		}
 	}
-
-	// 检查迭代器是否有错误
-	if err := iter.Error(); err != nil {
-		return err
-	}
-	return nil
+	return iter.Error()
 }

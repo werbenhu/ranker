@@ -4,12 +4,11 @@ import (
 	"errors"
 	"math"
 	"math/rand"
-	"sync"
 )
 
 const (
-	SKIPLIST_MAXLEVEL    = 32   // 最大跳表层数，适用于最多 2^32 个元素
-	SKIPLIST_Probability = 0.25 // 跳表每一层的概率为 1/4
+	SKIPLIST_MAXLEVEL    = 18         // 最大跳表层数，适用于最多 2^32 个元素
+	SKIPLIST_Probability = 1 / math.E // 跳表每一层的概率为 1/4
 )
 
 var (
@@ -20,8 +19,7 @@ var (
 type (
 	// ZSet 代表一个有序集合（Sorted Set）。
 	ZSet struct {
-		sync.Mutex
-		records map[string]*zset // 用于存储成员的字典
+		zset *zset // 用于存储成员的字典
 	}
 
 	// zskiplistLevel 代表跳表的每一层，包含了前进指针和跨度信息
@@ -34,7 +32,6 @@ type (
 	// level 是跳表节点的每一层的指针数组
 	zskiplistNode struct {
 		member   string            // 成员（key）
-		value    interface{}       // 对应的值
 		score    float64           // 成员的分数
 		backward *zskiplistNode    // 指向前一个节点的指针
 		level    []*zskiplistLevel // 跳表层数的指针数组
@@ -84,11 +81,10 @@ func randomLevel() int {
 }
 
 // createNode 创建一个新的跳表节点，给定层数、分数、成员和对应的值
-func createNode(level int, score float64, member string, value interface{}) *zskiplistNode {
+func createNode(level int, score float64, member string) *zskiplistNode {
 	node := &zskiplistNode{
 		score:  score,
 		member: member,
-		value:  value,
 		level:  make([]*zskiplistLevel, level), // 初始化节点的层数
 	}
 
@@ -103,13 +99,13 @@ func createNode(level int, score float64, member string, value interface{}) *zsk
 // newZSkipList 创建一个新的跳表，初始化头节点和层数
 func newZSkipList() *zskiplist {
 	return &zskiplist{
-		level: 1,                                         // 初始化为1层
-		head:  createNode(SKIPLIST_MAXLEVEL, 0, "", nil), // 创建头节点
+		level: 1,                                    // 初始化为1层
+		head:  createNode(SKIPLIST_MAXLEVEL, 0, ""), // 创建头节点
 	}
 }
 
 // insert 将一个新节点插入跳表中，假设插入的元素在跳表中不存在
-func (z *zskiplist) insert(score float64, member string, value interface{}) *zskiplistNode {
+func (z *zskiplist) insert(score float64, member string) *zskiplistNode {
 	// 用于存储插入位置的节点
 	updates := make([]*zskiplistNode, SKIPLIST_MAXLEVEL)
 	// 用于存储每一层的排名
@@ -150,7 +146,7 @@ func (z *zskiplist) insert(score float64, member string, value interface{}) *zsk
 	}
 
 	// 创建新的节点
-	x = createNode(level, score, member, value)
+	x = createNode(level, score, member)
 	for i := 0; i < level; i++ {
 		x.level[i].forward = updates[i].level[i].forward
 		updates[i].level[i].forward = x
@@ -428,76 +424,42 @@ func (z *zset) findRange(start, stop int64, reverse bool) (val []any) {
 // 创建一个新的 ZSet 对象
 func NewZSet() *ZSet {
 	return &ZSet{
-		records: make(map[string]*zset),
+		zset: &zset{
+			dict: make(map[string]*zskiplistNode),
+			zsl:  newZSkipList(),
+		},
 	}
 }
 
-// 检查 key 是否存在
-func (z *ZSet) exist(key string) bool {
-	_, exist := z.records[key]
-	return exist
-}
-
-func (z *ZSet) zadd(key string, score float64, member string, value interface{}) (val int, err error) {
-
-	item := z.records[key]
-	v, exist := item.dict[member]
-
+// ZAdd 将指定的成员和分数添加到指定的有序集合中
+// 该方法的时间复杂度是 O(log(N))
+func (z *ZSet) ZAdd(score float64, member string) (val int, err error) {
+	v, exist := z.zset.dict[member]
 	var node *zskiplistNode
 	if exist {
 		val = 0
 		// 如果 score 改变，删除并重新插入
 		if score != v.score {
-			item.zsl.delete(v.score, member)
-			node = item.zsl.insert(score, member, value)
-		} else {
-			// 如果 score 没有变化，直接更新 value
-			v.value = value
+			z.zset.zsl.delete(v.score, member)
+			node = z.zset.zsl.insert(score, member)
 		}
 	} else {
 		val = 1
 		// 如果元素不存在，直接插入
-		node = item.zsl.insert(score, member, value)
+		node = z.zset.zsl.insert(score, member)
 	}
 
 	// 更新字典中的节点
 	if node != nil {
-		item.dict[member] = node
+		z.zset.dict[member] = node
 	}
 	return
 }
 
-// ZAdd 将指定的成员和分数添加到指定的有序集合中
-// 该方法的时间复杂度是 O(log(N))
-func (z *ZSet) ZAdd(key string, score float64, member string, value interface{}) (val int, err error) {
-
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-
-		// 如果不存在该 key，则创建新的 zset
-		node := &zset{
-			dict: make(map[string]*zskiplistNode),
-			zsl:  newZSkipList(),
-		}
-		z.records[key] = node
-	}
-
-	return z.zadd(key, score, member, value)
-}
-
 // ZScore 返回指定成员在指定有序集合中的分数。
-func (z *ZSet) ZScore(key string, member string) (score float64, err error) {
+func (z *ZSet) ZScore(member string) (score float64, err error) {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return score, ErrKeyNotExist
-	}
-
-	node, exist := z.records[key].dict[member]
+	node, exist := z.zset.dict[member]
 	if !exist {
 		return score, ErrKeyNotExist
 	}
@@ -506,27 +468,14 @@ func (z *ZSet) ZScore(key string, member string) (score float64, err error) {
 }
 
 // ZCard 返回指定 key 的有序集合元素数量
-func (z *ZSet) ZCard(key string) int {
-
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return 0
-	}
-	return len(z.records[key].dict)
+func (z *ZSet) ZCard() int {
+	return len(z.zset.dict)
 }
 
 // ZRank 返回指定成员在有序集合中的排名，按分数从低到高排序
-func (z *ZSet) ZRank(key, member string) (int64, error) {
+func (z *ZSet) ZRank(member string) (int64, error) {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return -1, ErrKeyNotExist
-	}
-	n := z.records[key]
+	n := z.zset
 	v, exist := n.dict[member]
 	if !exist {
 		return -1, ErrKeyNotExist
@@ -537,15 +486,9 @@ func (z *ZSet) ZRank(key, member string) (int64, error) {
 }
 
 // ZRevRank 返回指定成员在有序集合中的排名，按分数从高到低排序
-func (z *ZSet) ZRevRank(key, member string) (int64, error) {
+func (z *ZSet) ZRevRank(member string) (int64, error) {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return -1, ErrKeyNotExist
-	}
-	n := z.records[key]
+	n := z.zset
 	v, exist := n.dict[member]
 	if !exist {
 		return -1, ErrKeyNotExist
@@ -555,16 +498,9 @@ func (z *ZSet) ZRevRank(key, member string) (int64, error) {
 }
 
 // ZRevRankWithScore 返回指定成员的排名及其分数，按分数从高到低排序
-func (z *ZSet) ZRevRankWithScore(key, member string) (rs RankScore, err error) {
+func (z *ZSet) ZRevRankWithScore(member string) (rs RankScore, err error) {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		rs.Rank = -1
-		return rs, ErrKeyNotExist
-	}
-	n := z.records[key]
+	n := z.zset
 	v, exist := n.dict[member]
 	if !exist {
 		rs.Rank = -1
@@ -578,46 +514,22 @@ func (z *ZSet) ZRevRankWithScore(key, member string) (rs RankScore, err error) {
 }
 
 // ZIncrBy 增加指定成员的分数，如果成员不存在，则将其分数设置为 increment
-func (z *ZSet) ZIncrBy(key string, increment float64, member string) (float64, error) {
+func (z *ZSet) ZIncrBy(increment float64, member string) (float64, error) {
 
-	z.Lock()
-	defer z.Unlock()
+	node, memberExists := z.zset.dict[member]
 
-	keyExists := z.exist(key)
-
-	if keyExists {
-		node, memberExists := z.records[key].dict[member]
-
-		if memberExists {
-			increment += node.score
-			z.zadd(key, increment, member, node.value)
-		}
+	if memberExists {
+		increment += node.score
+		z.ZAdd(increment, member)
 	}
 
-	if !keyExists {
-
-		// 如果不存在该 key，则创建新的 zset
-		zs := &zset{
-			dict: make(map[string]*zskiplistNode),
-			zsl:  newZSkipList(),
-		}
-
-		z.records[key] = zs
-		z.zadd(key, increment, member, nil)
-	}
 	return increment, nil
 }
 
 // ZRem 从有序集合中移除指定成员，成员不存在则忽略
-func (z *ZSet) ZRem(key, member string) error {
+func (z *ZSet) ZRem(member string) error {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return ErrKeyNotExist
-	}
-	n := z.records[key]
+	n := z.zset
 	v, exist := n.dict[member]
 	if exist {
 		n.zsl.delete(v.score, member)
@@ -628,21 +540,14 @@ func (z *ZSet) ZRem(key, member string) error {
 }
 
 // ZScoreRange 返回有序集合中分数在 min 和 max 之间的元素（包括 min 和 max 的元素），按分数从低到高排序
-func (z *ZSet) ZScoreRange(key string, min, max float64) (val []interface{}, err error) {
-
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
+func (z *ZSet) ZScoreRange(min, max float64) (val []interface{}, err error) {
 
 	if max < min {
 		err = ErrInvalidParams
 		return
 	}
 
-	item := z.records[key].zsl
+	item := z.zset.zsl
 	minScore := item.head.level[0].forward.score
 	if min < minScore {
 		min = minScore
@@ -669,21 +574,14 @@ func (z *ZSet) ZScoreRange(key string, min, max float64) (val []interface{}, err
 }
 
 // ZRevScoreRange 返回有序集合中分数在 max 和 min 之间的元素（包括 max 和 min 的元素），按分数从高到低排序
-func (z *ZSet) ZRevScoreRange(key string, max, min float64) (val []Z, err error) {
-
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
+func (z *ZSet) ZRevScoreRange(max, min float64) (val []Z, err error) {
 
 	if max < min {
 		err = ErrInvalidParams
 		return
 	}
 
-	item := z.records[key].zsl
+	item := z.zset.zsl
 	minScore := item.head.level[0].forward.score
 	if min < minScore {
 		min = minScore
@@ -708,134 +606,63 @@ func (z *ZSet) ZRevScoreRange(key string, max, min float64) (val []Z, err error)
 	return
 }
 
-// ZKeyExists 检查指定的 key 是否存在
-func (z *ZSet) ZKeyExists(key string) bool {
-	z.Lock()
-	defer z.Unlock()
-
-	return z.exist(key)
-}
-
-// ZClear 清除指定 key 对应的 zset
-func (z *ZSet) ZClear(key string) {
-	z.Lock()
-	defer z.Unlock()
-
-	if z.ZKeyExists(key) {
-		delete(z.records, key)
-	}
-}
-
 // ZRange 获取指定范围内的 zset 元素
-func (z *ZSet) ZRange(key string, start, stop int) ([]interface{}, error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-	n := z.records[key]
+func (z *ZSet) ZRange(start, stop int) ([]interface{}, error) {
+	n := z.zset
 	return n.findRange(int64(start), int64(stop), false), nil
 }
 
 // ZRangeWithScores 获取指定范围内的 zset 元素及分数
-func (z *ZSet) ZRangeWithScores(key string, start, stop int) ([]Z, error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-
-	n := z.records[key]
+func (z *ZSet) ZRangeWithScores(start, stop int) ([]Z, error) {
+	n := z.zset
 	return n.findRangeWithScore(int64(start), int64(stop), false), nil
 }
 
 // ZRevRange 获取按分数降序排列的指定范围内的 zset 元素
-func (z *ZSet) ZRevRange(key string, start, stop int) ([]interface{}, error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-	n := z.records[key]
+func (z *ZSet) ZRevRange(start, stop int) ([]interface{}, error) {
+	n := z.zset
 	return n.findRange(int64(start), int64(stop), true), nil
 }
 
 // ZRevRangeWithScores 获取按分数降序排列的指定范围内的 zset 元素及分数
-func (z *ZSet) ZRevRangeWithScores(key string, start, stop int) ([]Z, error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-	n := z.records[key]
+func (z *ZSet) ZRevRangeWithScores(start, stop int) ([]Z, error) {
+	n := z.zset
 	return n.findRangeWithScore(int64(start), int64(stop), true), nil
 }
 
 // ZGetByRank 根据排名获取 zset 元素，排名从低到高
-func (z *ZSet) ZGetByRank(key string, rank int) (val []interface{}, err error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-
-	n := z.records[key]
+func (z *ZSet) ZGetByRank(rank int) (val []interface{}, err error) {
+	n := z.zset
 	member, score := n.getNodeByRank(int64(rank), false)
 	val = append(val, member, score)
 	return
 }
 
 // ZRevGetByRank 根据排名获取 zset 元素，排名从高到低
-func (z *ZSet) ZRevGetByRank(key string, rank int) (val []interface{}, err error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-
-	n := z.records[key]
+func (z *ZSet) ZRevGetByRank(rank int) (val []interface{}, err error) {
+	n := z.zset
 	member, score := n.getNodeByRank(int64(rank), true)
 	val = append(val, member, score)
 	return
 }
 
 // ZPopMin 获取并删除分数最小的元素，若 zset 为空返回 nil
-func (z *ZSet) ZPopMin(key string) (rec *zskiplistNode, err error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-
-	n := z.records[key]
+func (z *ZSet) ZPopMin() (rec *zskiplistNode, err error) {
+	n := z.zset
 	x := n.zsl.head.level[0].forward
 	if x != nil {
-		z.ZRem(key, x.member)
+		z.ZRem(x.member)
 	}
 
 	return x, nil
 }
 
 // ZPopMax 获取并删除分数最大的元素，若 zset 为空返回 nil
-func (z *ZSet) ZPopMax(key string) (rec *zskiplistNode, err error) {
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return nil, ErrKeyNotExist
-	}
-
-	n := z.records[key]
+func (z *ZSet) ZPopMax() (rec *zskiplistNode, err error) {
+	n := z.zset
 	x := n.zsl.tail
 	if x != nil {
-		z.ZRem(key, x.member)
+		z.ZRem(x.member)
 	}
 
 	return x, nil
@@ -849,16 +676,9 @@ type ZRangeOptions struct {
 }
 
 // ZRangeByScore 根据分数范围获取 zset 元素。
-func (z *ZSet) ZRangeByScore(key string, start, end float64, options *ZRangeOptions) (nodes []*zskiplistNode) {
+func (z *ZSet) ZRangeByScore(start, end float64, options *ZRangeOptions) (nodes []*zskiplistNode) {
 
-	z.Lock()
-	defer z.Unlock()
-
-	if !z.exist(key) {
-		return
-	}
-
-	n := z.records[key]
+	n := z.zset
 	zsl := n.zsl
 
 	// 设置默认参数
@@ -954,32 +774,12 @@ func (z *ZSet) ZRangeByScore(key string, start, end float64, options *ZRangeOpti
 	return nodes
 }
 
-// Keys 返回所有的 zset key
-func (z *ZSet) Keys() []string {
-
-	z.Lock()
-	defer z.Unlock()
-
-	keys := make([]string, 0, len(z.records))
-	for k := range z.records {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // ZScan 实现了类似于 Redis 中的 ZSCAN 命令
-func (z *ZSet) ZScan(key string, cursor uint64, count int64) ([]any, uint64, error) {
-
-	z.Lock()
-	if !z.exist(key) {
-		z.Unlock()
-		return nil, 0, ErrKeyNotExist
-	}
-	z.Unlock()
+func (z *ZSet) ZScan(cursor uint64, count int64) ([]any, uint64, error) {
 
 	end := int(cursor)
 	if end == 0 {
-		end = z.ZCard(key)
+		end = z.ZCard()
 	}
 
 	start := end - int(count)
@@ -989,7 +789,7 @@ func (z *ZSet) ZScan(key string, cursor uint64, count int64) ([]any, uint64, err
 	}
 
 	// 获取完整的有序集合
-	items, err := z.ZRange(key, start, end-1)
+	items, err := z.ZRange(start, end-1)
 
 	if err != nil {
 		return nil, 0, err
